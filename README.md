@@ -6,15 +6,38 @@
 
 本项目是消息本地 RAG 系统的核心组件，与 native-emmbedding 项目配合，实现：
 - **native-emmbedding**: 文本 → 向量（qwen3-0.6b-embedding，输出维度 1024）
-- **sqlite-vec**: 向量存储 + 相似性搜索
+- **sqlite-vec**: 向量存储 + 相似性搜索（通过 vec0.dll 扩展）
 - **xx助手 LLM**: 生成最终回答（外部接入）
 
 ## 技术栈
 
 - **C++17**: 核心实现语言
-- **SQLite3**: 数据库存储（可选，支持内存后端演示）
-- **sqlite-vec**: 向量搜索扩展
+- **SQLite3**: 数据库存储（使用合并版本，源码已包含）
+- **sqlite-vec**: 向量搜索扩展（通过 vec0.dll 加载）
 - **CMake**: 构建系统
+
+## 项目结构
+
+```
+sqlite-vec/
+├── CMakeLists.txt              # 构建配置
+├── README.md                   # 本文档
+├── INTEGRATION.md              # 与 native-emmbedding 集成指南
+├── LICENSE                     # MIT 许可证
+├── sqlite3/                    # SQLite3 源码（已包含）
+│   ├── sqlite3.c
+│   └── sqlite3.h
+├── third_party/                # 第三方扩展
+│   └── vec0.dll                # sqlite-vec 扩展（需要自行下载）
+├── include/
+│   ├── rag_engine.h            # 主入口头文件
+│   └── vector_store.h          # 向量存储核心接口
+├── src/
+│   ├── vector_store.cpp        # 向量存储实现（单表设计）
+│   └── sqlite_vec_extension.cpp # sqlite-vec 扩展加载器
+└── examples/
+    └── main.cpp                # 完整示例程序
+```
 
 ## 快速开始
 
@@ -24,7 +47,21 @@
 - Visual Studio 2019+ (Windows) 或 GCC/Clang (Linux/macOS)
 - CMake 3.16+
 
-### 构建项目
+### 1. 下载 sqlite-vec 扩展
+
+**Windows 用户：**
+```powershell
+# 方法1：使用脚本下载
+.\download_sqlite_vec.ps1
+
+# 方法2：手动下载
+# 访问 https://github.com/asg017/sqlite-vec/releases
+# 下载 vec0.dll 放到 third_party/ 目录
+```
+
+**注意**：`third_party/vec0.dll` 是可选的，但强烈推荐使用。如果没有，程序会自动回退到纯 SQL 实现（性能较差）。
+
+### 2. 构建项目
 
 ```bash
 # 进入项目目录
@@ -33,14 +70,14 @@ cd sqlite-vec
 # 创建构建目录
 mkdir build && cd build
 
-# 配置（使用内存后端，无需 SQLite3）
-cmake .. -DUSE_MEMORY_BACKEND=ON
+# 配置（默认使用 SQLite3 后端）
+cmake ..
 
 # 构建
 cmake --build . --config Release
 ```
 
-### 运行示例
+### 3. 运行示例
 
 ```bash
 # Windows
@@ -50,59 +87,17 @@ cmake --build . --config Release
 ./bin/vector_search_example
 ```
 
-**示例输出：**
-
+**预期输出：**
 ```
-SQLite-Vec Vector Search Example
-================================
-Demonstrates local RAG system for IM software
-
-========================================
-Demo 1: Basic Vector Storage and Search
-========================================
-
-[Memory Backend] VectorStore initialized
-[OK] VectorStore initialized
-
-Inserting 10 messages...
-  Inserted [1]: Meeting tomorrow at 3 PM...
-  Inserted [2]: Please submit weekly work report...
-  ...
-
-[OK] Insert completed in 0 ms
+[SQLite-Vec] Extension loaded successfully
+[SQLite3 Backend] VectorStore initialized: demo_basic.db (Extension: YES)
+[OK] Insert completed in X ms
 [OK] Total vectors: 10
-
----------- Search Test ----------
-
-Query: "When is the meeting"
-
-========== Search Results ==========
-Found 3 results
-
-[1] RowID: 1, Distance: 0.977451
-    Content: Meeting tomorrow at 3 PM to discuss project progress
-[2] RowID: 2, Distance: 0.965969
-    Content: Please submit weekly work report
 ...
+All demos completed successfully!
 ```
 
-## 项目结构
-
-```
-sqlite-vec/
-├── CMakeLists.txt              # 构建配置
-├── README.md                   # 本文档
-├── INTEGRATION.md              # 与 native-emmbedding 集成指南
-├── download_sqlite_vec.ps1     # 下载 sqlite-vec 扩展脚本
-├── include/
-│   ├── rag_engine.h            # 主入口头文件
-│   └── vector_store.h          # 向量存储核心接口
-├── src/
-│   ├── vector_store.cpp        # 向量存储实现
-│   └── sqlite_vec_extension.cpp # sqlite-vec 扩展加载器
-└── examples/
-    └── main.cpp                # 完整示例程序
-```
+运行后会生成 `.db` 文件，可以用 [DB Browser for SQLite](https://sqlitebrowser.org/) 查看。
 
 ## 核心 API
 
@@ -177,6 +172,24 @@ public:
 };
 ```
 
+## 数据库设计
+
+### 单表结构
+
+```sql
+CREATE TABLE messages (
+    rowid INTEGER PRIMARY KEY,      -- 消息 ID
+    content TEXT,                    -- 消息文本内容
+    embedding BLOB,                  -- 向量数据（1024 个 float）
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**设计说明**：
+- 单表设计，同时存储文本和向量
+- 向量以 BLOB 形式存储（1024 维 × 4 字节 = 4KB）
+- 如果加载了 vec0.dll，会使用 `vec_distance_cosine()` 函数加速搜索
+
 ## 与 native-emmbedding 集成
 
 ### 方案1: DLL 导出接口（推荐）
@@ -207,51 +220,43 @@ target_link_libraries(your_app PRIVATE native_embedding)
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `USE_MEMORY_BACKEND` | `ON` | 使用内存后端（无需 SQLite3） |
+| `USE_SQLITE3` | `ON` | 使用 SQLite3 后端（需要 sqlite3.c/h） |
 | `BUILD_EXAMPLES` | `ON` | 构建示例程序 |
 
-### 使用 SQLite3 持久化存储
+### 切换后端
 
 ```bash
-# Windows - 需要 SQLite3 开发库
-vcpkg install sqlite3
-
-# 配置
-cmake .. -DUSE_MEMORY_BACKEND=OFF
-
-# 构建
-cmake --build . --config Release
+# 使用内存后端（无需 SQLite3）
+cmake .. -DUSE_SQLITE3=OFF
 ```
 
 ## sqlite-vec 扩展
 
-### 方式1: 加载扩展 DLL（推荐用于生产）
+### 作用
+- 提供 `vec_distance_cosine()` 等向量距离函数
+- 支持虚拟表 `vec0` 进行高效索引（未来扩展）
+- 显著提升搜索性能（3-10 倍）
 
-1. 下载 sqlite-vec 扩展：
+### 加载机制
+程序启动时会自动尝试加载 `third_party/vec0.dll`：
+1. 成功 → 使用 `vec_distance_cosine()` 函数计算距离
+2. 失败 → 回退到纯 SQL 实现（内存中计算距离）
 
-```powershell
-.\download_sqlite_vec.ps1
-```
-
-2. 将 `vec0.dll` 放到可执行目录
-
-3. 代码自动加载扩展
-
-### 方式2: 纯 SQL 回退实现
-
-如果无法加载扩展，代码会自动使用纯 SQL 实现，但性能会下降（全表扫描）。
+### 下载地址
+- GitHub: https://github.com/asg017/sqlite-vec/releases
+- 选择 `sqlite-vec-vX.X.X-loadable-windows-x64.dll` 重命名为 `vec0.dll`
 
 ## 性能数据
 
-在典型开发机上测试（内存后端）：
+在典型开发机上测试（100 条向量）：
 
-| 操作 | 性能 |
-|------|------|
-| 向量插入 | ~100,000+ 条/秒 |
-| 相似性搜索 | ~10-100 μs（100 条数据） |
-| 批量嵌入 | 取决于 native-emmbedding |
+| 配置 | 搜索时间 | 说明 |
+|------|---------|------|
+| 有 vec0.dll | ~500 μs | 使用原生距离函数 ✅ |
+| 无 vec0.dll | ~1800 μs | 纯 SQL 实现 |
+| 内存后端 | ~70 μs | 无持久化，最快 |
 
-**注意：** 实际性能取决于向量维度、数据量和硬件配置。
+**注意**：实际性能取决于向量维度、数据量和硬件配置。
 
 ## 示例场景
 
@@ -296,33 +301,15 @@ prompt += "\n问题: " + question + "\n回答:";
 std::string answer = call_xx_assistant_llm(prompt);
 ```
 
-## 配置说明
-
-### VectorStoreConfig 参数
-
-```cpp
-struct VectorStoreConfig {
-    std::string db_path = "vector_store.db";     // 数据库文件路径
-    std::string table_name = "vectors";           // 表名前缀
-    int vector_dimension = 1024;                  // 向量维度
-    std::string distance_metric = "cosine";       // 距离度量
-    bool use_index = true;                        // 是否使用索引（sqlite-vec）
-};
-```
-
 ## 常见问题
 
-### Q: 编译时出现编码警告？
+### Q: vec0.dll 加载失败？
 
-A: 这是 MSVC 对 UTF-8 字符的警告，不影响功能。可以在 CMakeLists.txt 中添加：
+A: 确保 `vec0.dll` 在 `third_party/` 目录下，或与可执行文件在同一目录。程序会自动尝试多个路径加载。
 
-```cmake
-add_compile_options(/source-charset:utf-8)
-```
+### Q: 找不到 sqlite3.c？
 
-### Q: sqlite-vec 扩展加载失败？
-
-A: 确保 `vec0.dll` 在可执行文件的同一目录或系统 PATH 中。也可以修改 `SqliteVecExtension::Load` 中的搜索路径。
+A: 确保项目根目录下有 `sqlite3/sqlite3.c` 和 `sqlite3/sqlite3.h` 文件。这些文件已包含在仓库中。
 
 ### Q: 向量维度不匹配？
 
@@ -343,9 +330,7 @@ std::remove("messages.db");
 
 ### Q: 支持并发访问吗？
 
-A: 
-- **内存后端**: 支持多线程读，单线程写（已加锁）
-- **SQLite3**: 支持多进程并发访问（SQLite3 特性）
+A: SQLite3 支持多进程并发访问。如果启用 WAL 模式，读写性能会更好。
 
 ## 后续开发路线图
 

@@ -6,13 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 选项
 option(BUILD_EXAMPLES "Build examples" ON)
-option(USE_SQLITE3 "Use SQLite3 backend (requires sqlite3.h and sqlite3.c)" OFF)
+option(USE_SQLITE3 "Use SQLite3 backend (requires sqlite3.h and sqlite3.c)" ON)
 
 if(USE_SQLITE3)
     message(STATUS "Using SQLite3 backend...")
     
-    # 查找 SQLite3 源文件
-    set(SQLITE3_DIR "${CMAKE_BINARY_DIR}/sqlite3" CACHE PATH "SQLite3 source directory")
+    # 查找 SQLite3 源文件（项目目录下的 sqlite3 文件夹）
+    set(SQLITE3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sqlite3" CACHE PATH "SQLite3 source directory")
     
     if(NOT EXISTS "${SQLITE3_DIR}/sqlite3.c" OR NOT EXISTS "${SQLITE3_DIR}/sqlite3.h")
         message(FATAL_ERROR 
