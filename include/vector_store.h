@@ -96,8 +96,6 @@ private:
     std::string last_error_;
     bool is_initialized_ = false;
     
-    // 回退实现
-    std::vector<SearchResult> SearchSimilarFallback(const Vector& query_vector, int top_k);
     static float CalculateCosineDistance(const float* a, const float* b, int dim);
 };
 

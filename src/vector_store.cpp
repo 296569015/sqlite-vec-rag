@@ -1,13 +1,13 @@
 #include "vector_store.h"
+#include "sqlite_vec_extension.h"
 #include <sstream>
 #include <iostream>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
-#include <mutex>
 #include <chrono>
 #include <iomanip>
+#include <sqlite3.h>
 
 // 日志宏定义
 #define LOG_ENTER() \
@@ -34,21 +34,7 @@ static std::string GetCurrentTime() {
     return oss.str();
 }
 
-// 根据宏定义选择后端
-#ifdef USE_SQLITE3
-    #include <sqlite3.h>
-    #include <filesystem>
-    #define USE_REAL_SQLITE
-#else
-    // 内存后端
-#endif
-
 namespace rag {
-
-// ==================== SQLite3 + sqlite-vec 后端实现 ====================
-#ifdef USE_REAL_SQLITE
-
-class SqliteVecExtension;
 
 class VectorStore::Impl {
 public:
@@ -74,99 +60,30 @@ public:
     }
     
     // 加载 vec0 扩展
-    bool LoadVecExtension(std::string& error_msg);
-};
-
-// 前置声明
-class SqliteVecExtension {
-public:
-    static bool Load(sqlite3* db, const std::string& dll_path, std::string& error_msg) {
+    bool LoadVecExtension(std::string& error_msg) {
         LOG_ENTER();
-        std::cout << "[LOG] Attempting to load vec0.dll from: " << dll_path << std::endl;
-        
-        int rc = sqlite3_enable_load_extension(db, 1);
-        if (rc != SQLITE_OK) {
-            error_msg = "Failed to enable extension loading";
-            LOG_ERROR(error_msg);
-            LOG_EXIT();
-            return false;
-        }
-        LOG_INFO("Extension loading enabled");
-        
-        char* err = nullptr;
-        
-        // 尝试从指定路径加载
-        if (!dll_path.empty()) {
-            std::cout << "[LOG] Trying path: " << dll_path << std::endl;
-            rc = sqlite3_load_extension(db, dll_path.c_str(), nullptr, &err);
-            if (rc == SQLITE_OK) {
-                LOG_INFO("SUCCESS - loaded from: " + dll_path);
-                LOG_EXIT();
-                return true;
-            }
-            if (err) {
-                std::cout << "[LOG] Failed: " << err << std::endl;
-                sqlite3_free(err);
-                err = nullptr;
-            }
-        }
-        
-        // 尝试其他常见路径
-        const char* paths[] = {
-            "./vec0",
-            "./third_party/vec0",
-            "vec0",
+        // 尝试多个可能的路径
+        std::vector<std::string> try_paths = {
             "third_party/vec0",
-            "./vec0.dll",
-            "./third_party/vec0.dll"
+            "third_party/vec0.dll",
+            "./third_party/vec0",
+            "./third_party/vec0.dll",
         };
         
-        for (const auto* path : paths) {
-            std::cout << "[LOG] Trying path: " << path << std::endl;
-            rc = sqlite3_load_extension(db, path, nullptr, &err);
-            if (rc == SQLITE_OK) {
-                LOG_INFO("SUCCESS - loaded from: " + std::string(path));
+        // 先尝试简单路径
+        for (const auto& path : try_paths) {
+            if (SqliteVecExtension::Load(db_, path, error_msg)) {
+                vec_extension_loaded_ = true;
                 LOG_EXIT();
                 return true;
             }
-            if (err) {
-                std::cout << "[LOG] Failed: " << err << std::endl;
-                sqlite3_free(err);
-                err = nullptr;
-            }
         }
         
-        error_msg = "Failed to load vec0.dll from any location";
-        LOG_ERROR(error_msg);
+        vec_extension_loaded_ = false;
         LOG_EXIT();
         return false;
     }
 };
-
-bool VectorStore::Impl::LoadVecExtension(std::string& error_msg) {
-    LOG_ENTER();
-    // 尝试多个可能的路径
-    std::vector<std::string> try_paths = {
-        // 相对于当前工作目录
-        "third_party/vec0",
-        "third_party/vec0.dll",
-        "./third_party/vec0",
-        "./third_party/vec0.dll",
-    };
-    
-    // 先尝试简单路径
-    for (const auto& path : try_paths) {
-        if (SqliteVecExtension::Load(db_, path, error_msg)) {
-            vec_extension_loaded_ = true;
-            LOG_EXIT();
-            return true;
-        }
-    }
-    
-    vec_extension_loaded_ = false;
-    LOG_EXIT();
-    return false;
-}
 
 VectorStore::VectorStore(const VectorStoreConfig& config)
     : impl_(std::make_unique<Impl>()), config_(config) {
@@ -566,190 +483,6 @@ void* VectorStore::GetDbHandle() const {
     LOG_EXIT();
     return impl_->db_;
 }
-
-// ==================== 内存后端实现 ====================
-#else
-
-struct MemoryVectorStore {
-    std::unordered_map<int64_t, std::pair<Vector, std::string>> data;
-    std::mutex mutex;
-    int64_t next_id = 1;
-};
-
-class VectorStore::Impl {
-public:
-    std::unique_ptr<MemoryVectorStore> memory_store;
-};
-
-VectorStore::VectorStore(const VectorStoreConfig& config)
-    : impl_(std::make_unique<Impl>()), config_(config) {
-    LOG_ENTER();
-    LOG_INFO("Memory backend - Config: table=" + config.table_name + ", dim=" + std::to_string(config.vector_dimension));
-    impl_->memory_store = std::make_unique<MemoryVectorStore>();
-    LOG_EXIT();
-}
-
-VectorStore::~VectorStore() {
-    LOG_ENTER();
-    LOG_EXIT();
-}
-
-VectorStore::VectorStore(VectorStore&&) noexcept = default;
-VectorStore& VectorStore::operator=(VectorStore&&) noexcept = default;
-
-bool VectorStore::Initialize() {
-    LOG_ENTER();
-    is_initialized_ = true;
-    LOG_INFO("Memory backend initialized");
-    LOG_EXIT();
-    return true;
-}
-
-int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const std::string& content) {
-    LOG_ENTER();
-    
-    if (!is_initialized_) {
-        last_error_ = "VectorStore not initialized";
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return -1;
-    }
-    
-    if ((int)vector.size() != config_.vector_dimension) {
-        last_error_ = "Vector dimension mismatch";
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return -1;
-    }
-    
-    std::lock_guard<std::mutex> lock(impl_->memory_store->mutex);
-    
-    if (row_id < 0) {
-        row_id = impl_->memory_store->next_id++;
-    } else {
-        impl_->memory_store->next_id = std::max(impl_->memory_store->next_id, row_id + 1);
-    }
-    
-    impl_->memory_store->data[row_id] = {vector, content};
-    LOG_INFO("Inserted: row_id=" + std::to_string(row_id));
-    LOG_EXIT();
-    return row_id;
-}
-
-bool VectorStore::InsertVectors(const std::vector<std::pair<Vector, std::string>>& vectors) {
-    LOG_ENTER();
-    LOG_INFO("Batch insert: " + std::to_string(vectors.size()) + " vectors");
-    
-    for (const auto& [vec, content] : vectors) {
-        if (InsertVector(-1, vec, content) < 0) {
-            LOG_ERROR("Batch insert failed");
-            LOG_EXIT();
-            return false;
-        }
-    }
-    
-    LOG_INFO("Batch insert successful");
-    LOG_EXIT();
-    return true;
-}
-
-std::vector<SearchResult> VectorStore::SearchSimilar(const Vector& query_vector, int top_k) {
-    LOG_ENTER();
-    LOG_INFO("Search: top_k=" + std::to_string(top_k));
-    
-    std::vector<SearchResult> results;
-    
-    if (!is_initialized_) {
-        last_error_ = "VectorStore not initialized";
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return results;
-    }
-    
-    if ((int)query_vector.size() != config_.vector_dimension) {
-        last_error_ = "Query vector dimension mismatch";
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return results;
-    }
-    
-    std::lock_guard<std::mutex> lock(impl_->memory_store->mutex);
-    
-    LOG_INFO("Scanning " + std::to_string(impl_->memory_store->data.size()) + " vectors");
-    std::vector<std::pair<int64_t, float>> distances;
-    
-    for (const auto& [row_id, data] : impl_->memory_store->data) {
-        const auto& [vec, _] = data;
-        float dist = CalculateCosineDistance(query_vector.data(), vec.data(), config_.vector_dimension);
-        distances.emplace_back(row_id, dist);
-    }
-    
-    std::sort(distances.begin(), distances.end(), 
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-    
-    int count = std::min(top_k, (int)distances.size());
-    LOG_INFO("Returning top " + std::to_string(count) + " results");
-    
-    for (int i = 0; i < count; ++i) {
-        const auto& [vec, content] = impl_->memory_store->data[distances[i].first];
-        results.emplace_back(distances[i].first, distances[i].second, content);
-    }
-    
-    LOG_EXIT();
-    return results;
-}
-
-std::vector<SearchResult> VectorStore::SearchSimilarWithFilter(
-    const Vector& query_vector, int top_k, const std::string& where_clause) {
-    LOG_ENTER();
-    LOG_EXIT();
-    return SearchSimilar(query_vector, top_k);
-}
-
-bool VectorStore::DeleteVector(int64_t row_id) {
-    LOG_ENTER();
-    LOG_INFO("Deleting row_id=" + std::to_string(row_id));
-    std::lock_guard<std::mutex> lock(impl_->memory_store->mutex);
-    bool success = impl_->memory_store->data.erase(row_id) > 0;
-    LOG_INFO("Delete " + std::string(success ? "successful" : "failed"));
-    LOG_EXIT();
-    return success;
-}
-
-bool VectorStore::UpdateVector(int64_t row_id, const Vector& vector, const std::string& content) {
-    LOG_ENTER();
-    LOG_EXIT();
-    return InsertVector(row_id, vector, content) >= 0;
-}
-
-int64_t VectorStore::GetVectorCount() {
-    LOG_ENTER();
-    std::lock_guard<std::mutex> lock(impl_->memory_store->mutex);
-    int64_t count = impl_->memory_store->data.size();
-    LOG_INFO("Vector count: " + std::to_string(count));
-    LOG_EXIT();
-    return count;
-}
-
-bool VectorStore::ClearAll() {
-    LOG_ENTER();
-    std::lock_guard<std::mutex> lock(impl_->memory_store->mutex);
-    impl_->memory_store->data.clear();
-    LOG_INFO("All data cleared");
-    LOG_EXIT();
-    return true;
-}
-
-void* VectorStore::GetDbHandle() const {
-    LOG_ENTER();
-    LOG_INFO("Memory backend - no db handle");
-    LOG_EXIT();
-    return nullptr;
-}
-
-#endif
-
-// ==================== 公共实现 ====================
 
 float VectorStore::CalculateCosineDistance(const float* a, const float* b, int dim) {
     float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
