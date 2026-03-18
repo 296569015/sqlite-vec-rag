@@ -148,7 +148,7 @@ bool VectorStore::Initialize() {
         << "msgTimestamp INTEGER METADATA, "     // 消息时间戳
         // 原有字段
         << "content TEXT METADATA, "             // 消息内容
-        << "created_at TIMESTAMP METADATA"       // 入库时间
+        << "created_at TEXT METADATA"            // 入库时间 (sqlite-vec 不支持 TIMESTAMP)
         << ");";
     
     LOG_INFO("Creating virtual table: " + config_.table_name);
