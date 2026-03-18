@@ -133,10 +133,21 @@ bool VectorStore::Initialize() {
     impl_->vec_extension_loaded_ = true;
     
     // 创建 vec0 虚拟表（不是普通表！）
-    // 语法: CREATE VIRTUAL TABLE <name> USING vec0(embedding float[<dim>])
+    // 所有用于查询过滤的字段都必须加上 METADATA 关键字
     std::stringstream sql;
     sql << "CREATE VIRTUAL TABLE IF NOT EXISTS " << config_.table_name 
-        << " USING vec0(embedding float[" << config_.vector_dimension << "]);";
+        << " USING vec0("
+        << "embedding float[" << config_.vector_dimension << "], "  // 向量列
+        // 业务元数据字段 (全部标记为 METADATA)
+        << "convention_id TEXT METADATA, "       // 会话ID
+        << "servermessage_id TEXT METADATA, "    // 服务器消息唯一ID
+        << "recordtype TEXT METADATA, "          // 消息类型
+        << "orinaccout TEXT METADATA, "          // 发送人账号
+        << "msgTimestamp INTEGER METADATA, "     // 消息时间戳
+        // 原有字段
+        << "content TEXT METADATA, "             // 消息内容
+        << "created_at TIMESTAMP METADATA"       // 入库时间
+        << ");";
     
     LOG_INFO("Creating virtual table: " + config_.table_name);
     LOG_INFO("SQL: " + sql.str());
@@ -214,6 +225,95 @@ int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const st
     }
     
     LOG_INFO("Executing insert...");
+    rc = sqlite3_step(stmt);
+    
+    // 获取实际插入的 rowid
+    if (row_id < 0) {
+        row_id = sqlite3_last_insert_rowid(impl_->db_);
+    }
+    
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        last_error_ = "Failed to insert: " + std::string(sqlite3_errmsg(impl_->db_));
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return -1;
+    }
+    
+    LOG_INFO("Insert successful: row_id=" + std::to_string(row_id));
+    LOG_EXIT();
+    return row_id;
+}
+
+int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const VectorMetadata& metadata) {
+    LOG_ENTER();
+    
+    if (!is_initialized_) {
+        last_error_ = "VectorStore not initialized";
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return -1;
+    }
+    
+    if ((int)vector.size() != config_.vector_dimension) {
+        last_error_ = "Vector dimension mismatch: expected " + 
+                      std::to_string(config_.vector_dimension) + 
+                      ", got " + std::to_string(vector.size());
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return -1;
+    }
+    
+    LOG_INFO("Inserting vector with metadata: row_id=" + std::to_string(row_id) + 
+             ", convention_id=" + metadata.convention_id + 
+             ", recordtype=" + metadata.recordtype);
+    
+    // 构建 INSERT SQL，包含所有元数据字段
+    std::string sql = "INSERT INTO " + config_.table_name + 
+                      " (embedding, convention_id, servermessage_id, recordtype, "
+                      "orinaccout, msgTimestamp, content, created_at) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+    
+    if (row_id >= 0) {
+        // 如果指定了 rowid，使用 REPLACE
+        sql = "INSERT OR REPLACE INTO " + config_.table_name + 
+              " (rowid, embedding, convention_id, servermessage_id, recordtype, "
+              "orinaccout, msgTimestamp, content, created_at) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+    }
+    
+    LOG_INFO("Preparing SQL: " + sql);
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = "Failed to prepare insert: " + std::string(sqlite3_errmsg(impl_->db_));
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return -1;
+    }
+    
+    int bind_idx = 1;
+    
+    // 如果指定了 rowid，先绑定 rowid
+    if (row_id >= 0) {
+        sqlite3_bind_int64(stmt, bind_idx++, row_id);
+    }
+    
+    // 绑定向量
+    sqlite3_bind_blob(stmt, bind_idx++, vector.data(), 
+                      vector.size() * sizeof(float), SQLITE_STATIC);
+    
+    // 绑定元数据字段
+    sqlite3_bind_text(stmt, bind_idx++, metadata.convention_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, bind_idx++, metadata.servermessage_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, bind_idx++, metadata.recordtype.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, bind_idx++, metadata.orinaccout.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, bind_idx++, metadata.msgTimestamp);
+    sqlite3_bind_text(stmt, bind_idx++, metadata.content.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, bind_idx++, metadata.created_at.c_str(), -1, SQLITE_STATIC);
+    
+    LOG_INFO("Executing insert with all metadata...");
     rc = sqlite3_step(stmt);
     
     // 获取实际插入的 rowid
