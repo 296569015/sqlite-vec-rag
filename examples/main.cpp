@@ -1,335 +1,245 @@
-// Vector Search Example Program
-// Demonstrates local RAG system for IM software
-
-#include "vector_store.h"
 #include <iostream>
 #include <vector>
-#include <string>
 #include <random>
 #include <chrono>
+#include <sstream>
 
-using namespace rag;
+#include "vector_store.h"
+#include "sqlite_vec_extension.h"
 
-// Mock Embedding Service - replace with native-emmbedding in production
-class MockEmbeddingService : public EmbeddingService {
-public:
-    MockEmbeddingService(int dim = 1024) : dimension_(dim) {
-        rng_.seed(42);
+// 生成随机向量（1024维，模拟真实嵌入）
+std::vector<float> GenerateRandomVector(int dim) {
+    std::vector<float> vec(dim);
+    std::mt19937 gen(42); // 固定种子便于复现
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    for (int i = 0; i < dim; ++i) {
+        vec[i] = dist(gen);
     }
-    
-    Vector Embed(const std::string& text) override {
-        Vector vec(dimension_);
-        
-        size_t hash = std::hash<std::string>{}(text);
-        std::mt19937 local_rng(hash);
-        std::normal_distribution<float> dist(0.0f, 0.1f);
-        
-        for (int i = 0; i < dimension_; ++i) {
-            vec[i] = dist(local_rng);
-        }
-        
-        float norm = 0.0f;
-        for (float v : vec) {
-            norm += v * v;
-        }
-        norm = std::sqrt(norm);
-        if (norm > 0) {
-            for (auto& v : vec) {
-                v /= norm;
-            }
-        }
-        
-        return vec;
+    // 归一化（cosine similarity 需要单位向量）
+    float norm = 0.0f;
+    for (float v : vec) norm += v * v;
+    norm = std::sqrt(norm);
+    if (norm > 0) {
+        for (float& v : vec) v /= norm;
     }
-    
-    std::vector<Vector> EmbedBatch(const std::vector<std::string>& texts) override {
-        std::vector<Vector> results;
-        results.reserve(texts.size());
-        for (const auto& text : texts) {
-            results.push_back(Embed(text));
-        }
-        return results;
-    }
-    
-    int GetDimension() const override {
-        return dimension_;
-    }
-    
-private:
-    int dimension_;
-    std::mt19937 rng_;
-};
-
-// Print search results
-void PrintResults(const std::vector<SearchResult>& results) {
-    std::cout << "\n========== Search Results ==========" << std::endl;
-    std::cout << "Found " << results.size() << " results\n" << std::endl;
-    
-    for (size_t i = 0; i < results.size(); ++i) {
-        std::cout << "[" << (i + 1) << "] RowID: " << results[i].row_id 
-                  << ", Distance: " << results[i].distance << std::endl;
-        if (!results[i].content.empty()) {
-            std::cout << "    Content: " << results[i].content.substr(0, 100);
-            if (results[i].content.length() > 100) {
-                std::cout << "...";
-            }
-            std::cout << std::endl;
-        }
-        std::cout << std::endl;
-    }
+    return vec;
 }
 
-// Demo 1: Basic vector storage and search
-void DemoBasicUsage() {
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "Demo 1: Basic Vector Storage and Search" << std::endl;
-    std::cout << "========================================\n" << std::endl;
+// 打印向量摘要
+void PrintVectorSummary(const std::vector<float>& vec, int preview = 5) {
+    std::cout << "[";
+    for (int i = 0; i < std::min(preview, (int)vec.size()); ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << std::fixed << std::setprecision(4) << vec[i];
+    }
+    std::cout << "...] (dim=" << vec.size() << ")";
+}
+
+// 获取当前时间字符串
+std::string GetCurrentTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+// ==================== 演示1：基础向量操作 ====================
+void DemoBasicOperations() {
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "演示1: 基础向量存储与搜索" << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
     
-    VectorStoreConfig config;
+    // 配置
+    rag::VectorStoreConfig config;
     config.db_path = "demo_basic.db";
-    config.table_name = "messages";
+    config.table_name = "test_vectors";
     config.vector_dimension = 1024;
     config.distance_metric = "cosine";
     
-    VectorStore store(config);
+    // 初始化
+    rag::VectorStore store(config);
     if (!store.Initialize()) {
-        std::cerr << "Failed to initialize: " << store.GetLastError() << std::endl;
+        std::cerr << "[ERROR] 初始化失败: " << store.GetLastError() << std::endl;
         return;
     }
     
-    std::cout << "[OK] VectorStore initialized" << std::endl;
+    std::cout << "[SQLite3] VectorStore initialized: " << config.db_path << std::endl;
     
-    MockEmbeddingService embed_service(1024);
-    
-    // Sample IM messages
-    std::vector<std::string> messages = {
-        "Meeting tomorrow at 3 PM to discuss project progress",
-        "Please submit weekly work report",
-        "Company team building event next Saturday",
-        "This bug needs urgent fix, affects user login",
-        "New feature deployed, please test",
-        "Tech sharing session this afternoon about AI RAG",
-        "Code review this Friday afternoon",
-        "Customer reported performance issue, needs optimization",
-        "Next month version plan is ready",
-        "Please update to latest client version"
-    };
-    
-    std::cout << "\nInserting " << messages.size() << " messages..." << std::endl;
+    // 生成并插入测试向量
+    const int num_vectors = 10;
+    std::cout << "[INFO] Inserting " << num_vectors << " vectors..." << std::endl;
     
     auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < num_vectors; ++i) {
+        auto vec = GenerateRandomVector(1024);
+        std::string content = "Test message " + std::to_string(i);
+        store.InsertVector(-1, vec, content);
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "[OK] Insert completed in " << duration << " ms" << std::endl;
     
+    // 统计总数
+    std::cout << "[OK] Total vectors: " << store.GetVectorCount() << std::endl;
+    
+    // 相似性搜索
+    auto query_vec = GenerateRandomVector(1024);
+    std::cout << "\n[QUERY] Query vector: ";
+    PrintVectorSummary(query_vec);
+    std::cout << std::endl;
+    
+    std::cout << "[INFO] Searching top-5 similar vectors..." << std::endl;
+    auto results = store.SearchSimilar(query_vec, 5);
+    
+    std::cout << "\n--- Search Results ---" << std::endl;
+    for (size_t i = 0; i < results.size(); ++i) {
+        std::cout << "Rank " << (i + 1) << ": RowID=" << results[i].row_id 
+                  << ", Distance=" << std::fixed << std::setprecision(6) << results[i].distance
+                  << ", Content=" << results[i].content << std::endl;
+    }
+    
+    std::cout << "\n[OK] Demo1 completed!" << std::endl;
+}
+
+// ==================== 演示2：元数据存储（IM消息场景） ====================
+void DemoMetadataStorage() {
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "演示2: 带元数据的向量存储（IM消息场景）" << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
+    
+    // 配置
+    rag::VectorStoreConfig config;
+    config.db_path = "demo_metadata.db";
+    config.table_name = "msg_vectors";
+    config.vector_dimension = 1024;
+    config.distance_metric = "cosine";
+    
+    // 初始化
+    rag::VectorStore store(config);
+    if (!store.Initialize()) {
+        std::cerr << "[ERROR] 初始化失败: " << store.GetLastError() << std::endl;
+        return;
+    }
+    
+    std::cout << "[SQLite3] VectorStore initialized: " << config.db_path << std::endl;
+    
+    // 模拟 IM 消息数据
+    std::vector<std::pair<std::string, std::string>> messages = {
+        {"conv_001", "明天下午3点开会讨论项目进度"},
+        {"conv_001", "好的，我会准时参加"},
+        {"conv_002", "这个bug怎么复现？"},
+        {"conv_002", "在用户登录模块，点击忘记密码后触发"},
+        {"conv_003", "周报内容：本周完成了搜索模块的开发"}
+    };
+    
+    std::cout << "[INFO] Inserting " << messages.size() << " messages with metadata..." << std::endl;
+    
+    auto start = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < messages.size(); ++i) {
-        auto vec = embed_service.Embed(messages[i]);
-        int64_t row_id = store.InsertVector(-1, vec, messages[i]);
-        if (row_id < 0) {
-            std::cerr << "Insert failed: " << store.GetLastError() << std::endl;
-        } else {
-            std::cout << "  Inserted [" << row_id << "]: " 
-                      << messages[i].substr(0, 30) << "..." << std::endl;
+        const auto& [conv_id, content] = messages[i];
+        
+        // 准备元数据
+        rag::VectorMetadata meta;
+        meta.convention_id = conv_id;
+        meta.servermessage_id = "msg_" + std::to_string(1000 + i);
+        meta.recordtype = "text";
+        meta.orinaccout = "user_" + std::to_string(i % 3 + 1);
+        meta.msgTimestamp = 1704067200 + i * 3600; // 模拟时间戳
+        meta.content = content;
+        meta.created_at = GetCurrentTimestamp();
+        
+        // 生成向量（模拟 embedding 结果）
+        auto vec = GenerateRandomVector(1024);
+        
+        // 插入
+        int64_t row_id = store.InsertVector(-1, vec, meta);
+        if (row_id > 0) {
+            std::cout << "  [Insert] RowID=" << row_id 
+                      << ", Conv=" << conv_id 
+                      << ", Content=\"" << content << "\"" << std::endl;
         }
     }
     
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "[OK] Insert completed in " << duration << " ms" << std::endl;
     
-    std::cout << "\n[OK] Insert completed in " << duration.count() << " ms" << std::endl;
+    // 统计总数
     std::cout << "[OK] Total vectors: " << store.GetVectorCount() << std::endl;
     
-    // Search test
-    std::cout << "\n---------- Search Test ----------" << std::endl;
+    // 相似性搜索
+    auto query_vec = GenerateRandomVector(1024);
+    std::cout << "\n[QUERY] Query vector: ";
+    PrintVectorSummary(query_vec);
+    std::cout << std::endl;
     
-    std::vector<std::string> queries = {
-        "When is the meeting",
-        "System has problems to fix",
-        "Version update related"
-    };
-    
-    for (const auto& query : queries) {
-        std::cout << "\nQuery: \"" << query << "\"" << std::endl;
-        
-        auto query_vec = embed_service.Embed(query);
-        auto results = store.SearchSimilar(query_vec, 3);
-        
-        PrintResults(results);
-    }
-}
-
-// Demo 2: Batch insert and performance test
-void DemoBatchInsert() {
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "Demo 2: Batch Insert and Performance" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    
-    VectorStoreConfig config;
-    config.db_path = "demo_batch.db";
-    config.table_name = "batch_messages";
-    config.vector_dimension = 1024;
-    
-    VectorStore store(config);
-    if (!store.Initialize()) {
-        std::cerr << "Failed to initialize: " << store.GetLastError() << std::endl;
-        return;
-    }
-    
-    MockEmbeddingService embed_service(1024);
-    
-    const int num_messages = 100;
-    std::vector<std::string> batch_messages;
-    batch_messages.reserve(num_messages);
-    
-    std::vector<std::string> templates = {
-        "Notice about {}",
-        "{} project progress update",
-        "Meeting minutes for {}",
-        "Solution for {} issue",
-        "Schedule for next week {}"
-    };
-    
-    std::vector<std::string> topics = {
-        "tech sharing", "product review", "team building", "customer requirements", 
-        "bug fix", "feature development", "performance optimization", "security audit"
-    };
-    
-    for (int i = 0; i < num_messages; ++i) {
-        std::string msg = templates[i % templates.size()];
-        size_t pos = msg.find("{}");
-        if (pos != std::string::npos) {
-            msg.replace(pos, 2, topics[i % topics.size()]);
-        }
-        msg += " - Message " + std::to_string(i + 1);
-        batch_messages.push_back(msg);
-    }
-    
-    std::cout << "Embedding " << num_messages << " messages..." << std::endl;
-    auto start = std::chrono::high_resolution_clock::now();
-    auto vectors = embed_service.EmbedBatch(batch_messages);
-    auto embed_end = std::chrono::high_resolution_clock::now();
-    
-    std::cout << "Inserting vectors..." << std::endl;
-    std::vector<std::pair<Vector, std::string>> data;
-    for (size_t i = 0; i < batch_messages.size(); ++i) {
-        data.emplace_back(std::move(vectors[i]), batch_messages[i]);
-    }
-    
-    bool success = store.InsertVectors(data);
-    auto insert_end = std::chrono::high_resolution_clock::now();
-    
-    if (!success) {
-        std::cerr << "Batch insert failed: " << store.GetLastError() << std::endl;
-        return;
-    }
-    
-    auto embed_time = std::chrono::duration_cast<std::chrono::milliseconds>(embed_end - start);
-    auto insert_time = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - embed_end);
-    
-    std::cout << "\n[OK] Batch operation:" << std::endl;
-    std::cout << "  - Embedding: " << embed_time.count() << " ms (" 
-              << (num_messages * 1000.0 / embed_time.count()) << " msg/sec)" << std::endl;
-    std::cout << "  - Insert: " << insert_time.count() << " ms (" 
-              << (num_messages * 1000.0 / insert_time.count()) << " msg/sec)" << std::endl;
-    std::cout << "  - Total vectors: " << store.GetVectorCount() << std::endl;
-    
-    // Search performance test
-    std::cout << "\n---------- Search Performance ----------" << std::endl;
-    std::string query = "Tech sharing schedule";
-    auto query_vec = embed_service.Embed(query);
-    
-    auto search_start = std::chrono::high_resolution_clock::now();
+    std::cout << "[INFO] Searching top-5 similar messages..." << std::endl;
     auto results = store.SearchSimilar(query_vec, 5);
-    auto search_end = std::chrono::high_resolution_clock::now();
     
-    auto search_time = std::chrono::duration_cast<std::chrono::microseconds>(search_end - search_start);
+    std::cout << "\n--- Search Results ---" << std::endl;
+    for (size_t i = 0; i < results.size(); ++i) {
+        std::cout << "Rank " << (i + 1) << ": RowID=" << results[i].row_id 
+                  << ", Distance=" << std::fixed << std::setprecision(6) << results[i].distance
+                  << ", Content=" << results[i].content << std::endl;
+    }
     
-    std::cout << "\nQuery: \"" << query << "\"" << std::endl;
-    std::cout << "Search time: " << search_time.count() << " us" << std::endl;
-    PrintResults(results);
+    std::cout << "\n[OK] Demo2 completed!" << std::endl;
 }
 
-// Demo 3: RAG Query Engine
-void DemoRAGQuery() {
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "Demo 3: RAG Query Engine" << std::endl;
-    std::cout << "========================================\n" << std::endl;
+// ==================== 演示3：扩展信息 ====================
+void DemoExtensionInfo() {
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "演示3: sqlite-vec 扩展信息" << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
     
-    VectorStoreConfig config;
-    config.db_path = "demo_rag.db";
-    config.table_name = "knowledge_base";
-    config.vector_dimension = 1024;
-    
-    VectorStore store(config);
-    if (!store.Initialize()) {
-        std::cerr << "Failed to initialize: " << store.GetLastError() << std::endl;
+    // 先加载一次扩展
+    sqlite3* db;
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) {
+        std::cerr << "[ERROR] Failed to open memory DB" << std::endl;
         return;
     }
     
-    MockEmbeddingService embed_service(1024);
-    RAGQueryEngine rag_engine(store, embed_service);
+    std::string error_msg;
+    bool loaded = rag::SqliteVecExtension::Load(db, "third_party/vec0.dll", error_msg);
     
-    // Build knowledge base
-    std::vector<std::string> knowledge = {
-        "SQLite-Vec is a vector search extension for SQLite, supporting efficient similarity search.",
-        "RAG (Retrieval-Augmented Generation) combines retrieval and generation AI technology.",
-        "Embedding converts text into high-dimensional vectors for semantic understanding.",
-        "Qwen3-0.6B is a lightweight LLM by Alibaba Cloud, suitable for local deployment.",
-        "Vector databases store and retrieve high-dimensional vectors with ANN search.",
-        "Local RAG systems in IM software enable offline intelligent Q&A.",
-        "Cosine similarity measures angle between vectors, commonly used for text similarity.",
-        "Agentic RAG uses AI Agents for smarter retrieval-augmented generation."
-    };
-    
-    std::cout << "Building knowledge base..." << std::endl;
-    for (const auto& doc : knowledge) {
-        if (!rag_engine.AddDocument(doc)) {
-            std::cerr << "Failed to add document" << std::endl;
+    if (!loaded) {
+        std::cerr << "[WARNING] Extension not loaded: " << error_msg << std::endl;
+        std::cerr << "          检查 third_party/vec0.dll 是否存在" << std::endl;
+    } else {
+        std::cout << "[OK] sqlite-vec extension loaded successfully" << std::endl;
+        
+        if (rag::SqliteVecExtension::IsLoaded(db)) {
+            std::string version = rag::SqliteVecExtension::GetVersion(db);
+            std::cout << "[INFO] Extension version: " << version << std::endl;
         }
     }
-    std::cout << "[OK] Knowledge base built with " << store.GetVectorCount() << " documents\n" << std::endl;
     
-    // RAG queries
-    std::vector<std::string> queries = {
-        "What is vector search?",
-        "What are the advantages of local RAG?",
-        "How to calculate text similarity?"
-    };
-    
-    for (const auto& query : queries) {
-        std::cout << "========================================" << std::endl;
-        std::cout << "User Query: \"" << query << "\"" << std::endl;
-        std::cout << "========================================" << std::endl;
-        
-        auto results = rag_engine.Query(query, 3);
-        
-        std::cout << "\nRetrieved relevant knowledge:" << std::endl;
-        for (size_t i = 0; i < results.size(); ++i) {
-            std::cout << "[" << (i + 1) << "] (similarity: " 
-                      << (1.0f - results[i].distance) << ") "
-                      << results[i].content << std::endl;
-        }
-        
-        std::cout << "\n[LLM would generate answer using retrieved context...]" << std::endl;
-        std::cout << "(In production, this would call xx-assistant LLM API with context)\n" << std::endl;
-    }
+    sqlite3_close(db);
 }
 
+// ==================== 主函数 ====================
 int main() {
-    std::cout << "SQLite-Vec Vector Search Example" << std::endl;
-    std::cout << "================================" << std::endl;
-    std::cout << "Demonstrates local RAG system for IM software\n" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "  SQLite-Vec 向量搜索示例程序" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << std::endl;
     
-    try {
-        DemoBasicUsage();
-        DemoBatchInsert();
-        DemoRAGQuery();
-        
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "All demos completed successfully!" << std::endl;
-        std::cout << "========================================" << std::endl;
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
+    std::cout << "系统要求:" << std::endl;
+    std::cout << "  - SQLite3 (已集成)" << std::endl;
+    std::cout << "  - sqlite-vec 扩展 (vec0.dll)" << std::endl;
+    std::cout << "  - 向量维度: 1024 (qwen3-0.6b-embedding)" << std::endl;
+    std::cout << std::endl;
+    
+    // 运行所有演示
+    DemoExtensionInfo();
+    DemoBasicOperations();
+    DemoMetadataStorage();
+    
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "所有演示已完成!" << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
     
     return 0;
 }

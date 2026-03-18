@@ -174,21 +174,59 @@ public:
 
 ## 数据库设计
 
-### 单表结构
+### sqlite-vec 虚拟表结构
 
 ```sql
-CREATE TABLE messages (
-    rowid INTEGER PRIMARY KEY,      -- 消息 ID
-    content TEXT,                    -- 消息文本内容
-    embedding BLOB,                  -- 向量数据（1024 个 float）
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE VIRTUAL TABLE messages USING vec0(
+    embedding float[1024],           -- 向量列（必需）
+    convention_id TEXT METADATA,     -- 会话ID（元数据，可过滤）
+    servermessage_id TEXT METADATA,  -- 服务器消息唯一ID（元数据）
+    recordtype TEXT METADATA,        -- 消息类型（元数据）
+    orinaccout TEXT METADATA,        -- 发送人账号（元数据）
+    msgTimestamp INTEGER METADATA,   -- 消息时间戳（元数据）
+    content TEXT METADATA,           -- 消息内容（元数据）
+    created_at TIMESTAMP METADATA    -- 入库时间（元数据）
 );
 ```
 
 **设计说明**：
-- 单表设计，同时存储文本和向量
-- 向量以 BLOB 形式存储（1024 维 × 4 字节 = 4KB）
-- 如果加载了 vec0.dll，会使用 `vec_distance_cosine()` 函数加速搜索
+- **虚拟表**：使用 `USING vec0()` 语法创建，不是普通表
+- **向量列**：`embedding float[1024]` 是必需的向量列
+- **METADATA 列**：所有业务字段都标记为 `METADATA`，可用于查询过滤
+- **自动索引**：vec0 自动构建 HNSW/IVF 向量索引，无需手动创建
+
+### 插入数据（带元数据）
+
+```cpp
+#include "vector_store.h"
+
+// 准备元数据
+rag::VectorMetadata meta;
+meta.convention_id = "conv_12345";
+meta.servermessage_id = "msg_67890";
+meta.recordtype = "text";
+meta.orinaccout = "user_001";
+meta.msgTimestamp = 1704067200;
+meta.content = "这是一条测试消息";
+meta.created_at = "2024-01-01 12:00:00";
+
+// 生成向量
+auto vec = embed_service.Embed(meta.content);
+
+// 插入（带完整元数据）
+int64_t row_id = store.InsertVector(-1, vec, meta);
+```
+
+### 向量搜索 + 元数据过滤
+
+```cpp
+// 纯向量搜索
+auto results = store.SearchSimilar(query_vec, 10);
+
+// 带元数据过滤的搜索（示例）
+// SQL: WHERE embedding MATCH ? AND convention_id = 'conv_001'
+// TODO: 在 SearchSimilarWithFilter 中实现
+```
 
 ## 与 native-emmbedding 集成
 
