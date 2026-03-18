@@ -59,7 +59,7 @@ public:
         return rc == SQLITE_OK;
     }
     
-    // 加载 vec0 扩展
+    // 加载 vec0 扩展 - 必须成功，否则返回 false
     bool LoadVecExtension(std::string& error_msg) {
         LOG_ENTER();
         // 尝试多个可能的路径
@@ -114,43 +114,47 @@ bool VectorStore::Initialize() {
     }
     LOG_INFO("Database opened successfully");
     
-    // 加载 vec0 扩展
-    LOG_INFO("Loading sqlite-vec extension...");
+    // 加载 vec0 扩展 - 必须成功，这是 sqlite-vec 模式！
+    LOG_INFO("Loading sqlite-vec extension (REQUIRED)...");
     std::string ext_error;
     if (!impl_->LoadVecExtension(ext_error)) {
-        LOG_ERROR("Failed to load extension: " + ext_error);
-        LOG_INFO("Falling back to pure SQL implementation");
-        impl_->vec_extension_loaded_ = false;
-    } else {
-        LOG_INFO("Extension loaded successfully");
-        impl_->vec_extension_loaded_ = true;
-    }
-    
-    // 创建单表
-    std::stringstream sql;
-    sql << "CREATE TABLE IF NOT EXISTS " << config_.table_name << " ("
-        << "rowid INTEGER PRIMARY KEY, "
-        << "content TEXT, "
-        << "embedding BLOB, "
-        << "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);";
-    
-    LOG_INFO("Creating table: " + config_.table_name);
-    if (!impl_->ExecuteSQL(sql.str())) {
-        last_error_ = "Failed to create table: " + std::string(sqlite3_errmsg(impl_->db_));
+        last_error_ = "Failed to load sqlite-vec extension: " + ext_error + 
+                      ". This library requires vec0.dll to function. "
+                      "Please download it from https://github.com/asg017/sqlite-vec/releases "
+                      "and place it in the third_party/ directory.";
         LOG_ERROR(last_error_);
+        sqlite3_close(impl_->db_);
+        impl_->db_ = nullptr;
         LOG_EXIT();
         return false;
     }
-    LOG_INFO("Table created/verified");
     
-    // 创建索引
-    std::string index_sql = "CREATE INDEX IF NOT EXISTS idx_" + config_.table_name + "_rowid ON " 
-                          + config_.table_name + "(rowid);";
-    impl_->ExecuteSQL(index_sql);
-    LOG_INFO("Index created/verified");
+    LOG_INFO("Extension loaded successfully");
+    impl_->vec_extension_loaded_ = true;
+    
+    // 创建 vec0 虚拟表（不是普通表！）
+    // 语法: CREATE VIRTUAL TABLE <name> USING vec0(embedding float[<dim>])
+    std::stringstream sql;
+    sql << "CREATE VIRTUAL TABLE IF NOT EXISTS " << config_.table_name 
+        << " USING vec0(embedding float[" << config_.vector_dimension << "]);";
+    
+    LOG_INFO("Creating virtual table: " + config_.table_name);
+    LOG_INFO("SQL: " + sql.str());
+    
+    if (!impl_->ExecuteSQL(sql.str())) {
+        last_error_ = "Failed to create virtual table: " + std::string(sqlite3_errmsg(impl_->db_));
+        LOG_ERROR(last_error_);
+        sqlite3_close(impl_->db_);
+        impl_->db_ = nullptr;
+        LOG_EXIT();
+        return false;
+    }
+    LOG_INFO("Virtual table created/verified successfully");
+    
+    // 注意：vec0 虚拟表自动管理索引，不需要手动创建
     
     is_initialized_ = true;
-    LOG_INFO("VectorStore initialized successfully (Extension: " + std::string(impl_->vec_extension_loaded_ ? "YES" : "NO") + ")");
+    LOG_INFO("VectorStore (sqlite-vec mode) initialized successfully");
     LOG_EXIT();
     return true;
 }
@@ -176,23 +180,18 @@ int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const st
     
     LOG_INFO("Inserting vector: row_id=" + std::to_string(row_id) + ", content_len=" + std::to_string(content.length()));
     
-    // 如果 row_id 为 -1，获取下一个可用的 ID
-    if (row_id < 0) {
-        LOG_INFO("Auto-generating row_id...");
-        sqlite3_stmt* stmt;
-        std::string sql = "SELECT COALESCE(MAX(rowid), 0) + 1 FROM " + config_.table_name + ";";
-        int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
-        if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
-            row_id = sqlite3_column_int64(stmt, 0);
-            LOG_INFO("Generated row_id: " + std::to_string(row_id));
-        }
-        sqlite3_finalize(stmt);
-    }
-    
-    // 单表插入
+    // vec0 虚拟表的插入语法
+    // rowid 可以指定，如果不指定则自动生成
     sqlite3_stmt* stmt;
-    std::string sql = "INSERT OR REPLACE INTO " + config_.table_name + 
-                      " (rowid, content, embedding) VALUES (?, ?, ?);";
+    std::string sql;
+    
+    if (row_id < 0) {
+        // 自动生成 rowid
+        sql = "INSERT INTO " + config_.table_name + " (embedding) VALUES (?);";
+    } else {
+        // 指定 rowid
+        sql = "INSERT OR REPLACE INTO " + config_.table_name + " (rowid, embedding) VALUES (?, ?);";
+    }
     
     LOG_INFO("Preparing SQL: " + sql);
     int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
@@ -203,13 +202,25 @@ int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const st
         return -1;
     }
     
-    sqlite3_bind_int64(stmt, 1, row_id);
-    sqlite3_bind_text(stmt, 2, content.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_blob(stmt, 3, vector.data(), 
-                      vector.size() * sizeof(float), SQLITE_STATIC);
+    if (row_id < 0) {
+        // 只绑定向量
+        sqlite3_bind_blob(stmt, 1, vector.data(), 
+                          vector.size() * sizeof(float), SQLITE_STATIC);
+    } else {
+        // 绑定 rowid 和向量
+        sqlite3_bind_int64(stmt, 1, row_id);
+        sqlite3_bind_blob(stmt, 2, vector.data(), 
+                          vector.size() * sizeof(float), SQLITE_STATIC);
+    }
     
     LOG_INFO("Executing insert...");
     rc = sqlite3_step(stmt);
+    
+    // 获取实际插入的 rowid
+    if (row_id < 0) {
+        row_id = sqlite3_last_insert_rowid(impl_->db_);
+    }
+    
     sqlite3_finalize(stmt);
     
     if (rc != SQLITE_DONE) {
@@ -286,108 +297,40 @@ std::vector<SearchResult> VectorStore::SearchSimilar(const Vector& query_vector,
         return results;
     }
     
-    // 如果加载了 sqlite-vec 扩展，尝试使用它的距离函数
-    if (impl_->vec_extension_loaded_) {
-        LOG_INFO("Trying to use vec_distance_cosine()...");
-        sqlite3_stmt* test_stmt;
-        std::string test_sql = "SELECT vec_distance_cosine(?, ?);";
-        if (sqlite3_prepare_v2(impl_->db_, test_sql.c_str(), -1, &test_stmt, nullptr) == SQLITE_OK) {
-            sqlite3_finalize(test_stmt);
-            LOG_INFO("vec_distance_cosine() is available");
-            
-            sqlite3_stmt* stmt;
-            std::string sql = 
-                "SELECT rowid, content, vec_distance_cosine(embedding, ?) as distance "
-                "FROM " + config_.table_name + " "
-                "WHERE embedding IS NOT NULL "
-                "ORDER BY distance "
-                "LIMIT ?;";
-            
-            LOG_INFO("Preparing search SQL with extension...");
-            int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
-            if (rc == SQLITE_OK) {
-                sqlite3_bind_blob(stmt, 1, query_vector.data(), 
-                                 query_vector.size() * sizeof(float), SQLITE_STATIC);
-                sqlite3_bind_int(stmt, 2, top_k);
-                
-                LOG_INFO("Executing search...");
-                while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    int64_t rowid = sqlite3_column_int64(stmt, 0);
-                    const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-                    double distance = sqlite3_column_double(stmt, 2);
-                    results.emplace_back(rowid, static_cast<float>(distance), 
-                                        content ? content : "");
-                    LOG_INFO("Found: rowid=" + std::to_string(rowid) + ", distance=" + std::to_string(distance));
-                }
-                sqlite3_finalize(stmt);
-                LOG_INFO("Search complete: " + std::to_string(results.size()) + " results");
-                LOG_EXIT();
-                return results;
-            }
-            LOG_ERROR("Failed to prepare search SQL with extension");
-        } else {
-            LOG_INFO("vec_distance_cosine() not available, falling back");
-        }
-    } else {
-        LOG_INFO("Extension not loaded, using pure SQL implementation");
-    }
-    
-    // 回退：手动计算距离
-    LOG_INFO("Using fallback: manual distance calculation");
-    std::vector<std::pair<int64_t, float>> distances;
-    std::unordered_map<int64_t, std::string> content_map;
-    
+    // 使用 sqlite-vec 的 MATCH 语法进行向量搜索
+    // 这是 vec0 虚拟表的核心功能！
     sqlite3_stmt* stmt;
-    std::string sql = "SELECT rowid, content, embedding FROM " + config_.table_name + 
-                      " WHERE embedding IS NOT NULL;";
+    std::string sql = 
+        "SELECT rowid, distance "
+        "FROM " + config_.table_name + " "
+        "WHERE embedding MATCH ? "
+        "ORDER BY distance "
+        "LIMIT ?;";
     
-    LOG_INFO("Querying all vectors...");
+    LOG_INFO("Preparing search SQL: " + sql);
     int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        last_error_ = "Failed to prepare search";
+        last_error_ = "Failed to prepare search: " + std::string(sqlite3_errmsg(impl_->db_));
         LOG_ERROR(last_error_);
         LOG_EXIT();
         return results;
     }
     
-    int scanned = 0;
+    // 绑定向量作为查询
+    sqlite3_bind_blob(stmt, 1, query_vector.data(), 
+                     query_vector.size() * sizeof(float), SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, top_k);
+    
+    LOG_INFO("Executing search...");
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         int64_t rowid = sqlite3_column_int64(stmt, 0);
-        const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        const void* blob = sqlite3_column_blob(stmt, 2);
-        int blob_size = sqlite3_column_bytes(stmt, 2);
-        
-        if (blob && blob_size == config_.vector_dimension * sizeof(float)) {
-            const float* vec_data = static_cast<const float*>(blob);
-            float dist = CalculateCosineDistance(query_vector.data(), 
-                                                  vec_data, 
-                                                  config_.vector_dimension);
-            distances.emplace_back(rowid, dist);
-            if (content) content_map[rowid] = content;
-        }
-        scanned++;
+        double distance = sqlite3_column_double(stmt, 1);
+        results.emplace_back(rowid, static_cast<float>(distance), "");
+        LOG_INFO("Found: rowid=" + std::to_string(rowid) + ", distance=" + std::to_string(distance));
     }
+    
     sqlite3_finalize(stmt);
-    LOG_INFO("Scanned " + std::to_string(scanned) + " vectors");
-    
-    // 排序并取前 k 个
-    std::sort(distances.begin(), distances.end(), 
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-    
-    int count = std::min(top_k, (int)distances.size());
-    LOG_INFO("Returning top " + std::to_string(count) + " results");
-    
-    for (int i = 0; i < count; ++i) {
-        int64_t rowid = distances[i].first;
-        std::string content;
-        auto it = content_map.find(rowid);
-        if (it != content_map.end()) {
-            content = it->second;
-        }
-        results.emplace_back(rowid, distances[i].second, content);
-        LOG_INFO("Result #" + std::to_string(i+1) + ": rowid=" + std::to_string(rowid) + ", dist=" + std::to_string(distances[i].second));
-    }
-    
+    LOG_INFO("Search complete: " + std::to_string(results.size()) + " results");
     LOG_EXIT();
     return results;
 }
@@ -395,6 +338,12 @@ std::vector<SearchResult> VectorStore::SearchSimilar(const Vector& query_vector,
 std::vector<SearchResult> VectorStore::SearchSimilarWithFilter(
     const Vector& query_vector, int top_k, const std::string& where_clause) {
     LOG_ENTER();
+    LOG_INFO("Filter search: where=" + where_clause);
+    
+    // TODO: 实现带过滤的搜索
+    // vec0 支持在 MATCH 后添加 AND 条件
+    // 例如: WHERE embedding MATCH ? AND some_metadata = ?
+    
     LOG_INFO("Filter search not fully implemented, using regular search");
     LOG_EXIT();
     return SearchSimilar(query_vector, top_k);
@@ -445,7 +394,7 @@ int64_t VectorStore::GetVectorCount() {
         return -1;
     }
     
-    std::string sql = "SELECT COUNT(*) FROM " + config_.table_name + " WHERE embedding IS NOT NULL;";
+    std::string sql = "SELECT COUNT(*) FROM " + config_.table_name + ";";
     sqlite3_stmt* stmt;
     int64_t count = 0;
     
@@ -484,7 +433,8 @@ void* VectorStore::GetDbHandle() const {
     return impl_->db_;
 }
 
-float VectorStore::CalculateCosineDistance(const float* a, const float* b, int dim) {
+// 静态函数：计算余弦距离
+static float CalculateCosineDistance(const float* a, const float* b, int dim) {
     float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
     for (int i = 0; i < dim; ++i) {
         dot += a[i] * b[i];

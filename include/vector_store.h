@@ -95,8 +95,6 @@ private:
     VectorStoreConfig config_;
     std::string last_error_;
     bool is_initialized_ = false;
-    
-    static float CalculateCosineDistance(const float* a, const float* b, int dim);
 };
 
 // 嵌入服务接口 - 与 native-emmbedding 项目集成

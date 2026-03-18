@@ -47,7 +47,7 @@ sqlite-vec/
 - Visual Studio 2019+ (Windows) 或 GCC/Clang (Linux/macOS)
 - CMake 3.16+
 
-### 1. 下载 sqlite-vec 扩展（可选但推荐）
+### 1. 下载 sqlite-vec 扩展（必需）
 
 **Windows 用户：**
 ```powershell
@@ -59,7 +59,7 @@ sqlite-vec/
 # 下载 vec0.dll 放到 third_party/ 目录
 ```
 
-**注意**：`third_party/vec0.dll` 是可选的。如果存在，程序会自动加载并使用优化的向量距离函数；如果没有，程序会回退到纯 SQL 实现（性能较差）。
+**⚠️ 注意**：`third_party/vec0.dll` **是必需的**。本库专门用于 sqlite-vec 模式，如果扩展加载失败，程序会直接报错退出，不会回退到普通 SQL 实现。
 
 ### 2. 构建项目
 
@@ -97,7 +97,7 @@ cmake --build . --config Release
 All demos completed successfully!
 ```
 
-运行后会生成 `.db` 文件，可以用 [DB Browser for SQLite](https://sqlitebrowser.org/) 查看。
+运行后会生成 `.db` 文件。**注意**：必须使用支持 sqlite-vec 扩展的工具查看，普通 SQLite 客户端无法识别 vec0 虚拟表。
 
 ## 核心 API
 
