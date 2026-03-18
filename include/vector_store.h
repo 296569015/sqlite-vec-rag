@@ -5,6 +5,7 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <unordered_map>
 
 namespace rag {
 
@@ -56,14 +57,7 @@ public:
     // 初始化数据库和表
     bool Initialize();
     
-    // 插入向量（简单版本，只插入向量和内容）
-    // @param row_id: 行ID（如果为-1则自动分配）
-    // @param vector: 向量数据
-    // @param content: 关联的原始文本内容（可选）
-    // @return: 实际的 row_id，失败返回 -1
-    int64_t InsertVector(int64_t row_id, const Vector& vector, const std::string& content = "");
-    
-    // 插入向量（完整版本，包含所有元数据字段）
+    // 插入向量（带完整元数据）
     // @param row_id: 行ID（如果为-1则自动分配）
     // @param vector: 向量数据
     // @param metadata: 元数据（会话ID、消息类型、发送人等）
@@ -71,7 +65,7 @@ public:
     int64_t InsertVector(int64_t row_id, const Vector& vector, const VectorMetadata& metadata);
     
     // 批量插入向量
-    bool InsertVectors(const std::vector<std::pair<Vector, std::string>>& vectors);
+    bool InsertVectors(const std::vector<std::pair<Vector, VectorMetadata>>& vectors);
     
     // 相似性搜索
     // @param query_vector: 查询向量
@@ -79,18 +73,22 @@ public:
     // @return: 搜索结果列表
     std::vector<SearchResult> SearchSimilar(const Vector& query_vector, int top_k = 5);
     
-    // 带过滤条件的搜索
+    // 带过滤条件的搜索（安全的参数化查询）
+    // @param query_vector: 查询向量
+    // @param top_k: 返回最相似的 k 个结果
+    // @param filters: 元数据过滤条件（key-value 对，支持 convention_id, recordtype, orinaccout 等）
+    // @return: 搜索结果列表
     std::vector<SearchResult> SearchSimilarWithFilter(
         const Vector& query_vector, 
         int top_k, 
-        const std::string& where_clause
+        const std::unordered_map<std::string, std::string>& filters
     );
     
     // 删除向量
     bool DeleteVector(int64_t row_id);
     
     // 更新向量
-    bool UpdateVector(int64_t row_id, const Vector& vector, const std::string& content = "");
+    bool UpdateVector(int64_t row_id, const Vector& vector, const VectorMetadata& metadata);
     
     // 获取向量数量
     int64_t GetVectorCount();

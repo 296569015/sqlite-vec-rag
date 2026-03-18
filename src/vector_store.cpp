@@ -7,6 +7,8 @@
 #include <cmath>
 #include <chrono>
 #include <iomanip>
+#include <unordered_map>
+#include <unordered_set>
 #include <sqlite3.h>
 
 // 日志宏定义
@@ -170,82 +172,6 @@ bool VectorStore::Initialize() {
     return true;
 }
 
-int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const std::string& content) {
-    LOG_ENTER();
-    
-    if (!is_initialized_) {
-        last_error_ = "VectorStore not initialized";
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return -1;
-    }
-    
-    if ((int)vector.size() != config_.vector_dimension) {
-        last_error_ = "Vector dimension mismatch: expected " + 
-                      std::to_string(config_.vector_dimension) + 
-                      ", got " + std::to_string(vector.size());
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return -1;
-    }
-    
-    LOG_INFO("Inserting vector: row_id=" + std::to_string(row_id) + ", content_len=" + std::to_string(content.length()));
-    
-    // vec0 虚拟表的插入语法
-    // rowid 可以指定，如果不指定则自动生成
-    sqlite3_stmt* stmt;
-    std::string sql;
-    
-    if (row_id < 0) {
-        // 自动生成 rowid
-        sql = "INSERT INTO " + config_.table_name + " (embedding) VALUES (?);";
-    } else {
-        // 指定 rowid
-        sql = "INSERT OR REPLACE INTO " + config_.table_name + " (rowid, embedding) VALUES (?, ?);";
-    }
-    
-    LOG_INFO("Preparing SQL: " + sql);
-    int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        last_error_ = "Failed to prepare insert: " + std::string(sqlite3_errmsg(impl_->db_));
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return -1;
-    }
-    
-    if (row_id < 0) {
-        // 只绑定向量
-        sqlite3_bind_blob(stmt, 1, vector.data(), 
-                          vector.size() * sizeof(float), SQLITE_STATIC);
-    } else {
-        // 绑定 rowid 和向量
-        sqlite3_bind_int64(stmt, 1, row_id);
-        sqlite3_bind_blob(stmt, 2, vector.data(), 
-                          vector.size() * sizeof(float), SQLITE_STATIC);
-    }
-    
-    LOG_INFO("Executing insert...");
-    rc = sqlite3_step(stmt);
-    
-    // 获取实际插入的 rowid
-    if (row_id < 0) {
-        row_id = sqlite3_last_insert_rowid(impl_->db_);
-    }
-    
-    sqlite3_finalize(stmt);
-    
-    if (rc != SQLITE_DONE) {
-        last_error_ = "Failed to insert: " + std::string(sqlite3_errmsg(impl_->db_));
-        LOG_ERROR(last_error_);
-        LOG_EXIT();
-        return -1;
-    }
-    
-    LOG_INFO("Insert successful: row_id=" + std::to_string(row_id));
-    LOG_EXIT();
-    return row_id;
-}
-
 int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const VectorMetadata& metadata) {
     LOG_ENTER();
     
@@ -335,7 +261,7 @@ int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const Ve
     return row_id;
 }
 
-bool VectorStore::InsertVectors(const std::vector<std::pair<Vector, std::string>>& vectors) {
+bool VectorStore::InsertVectors(const std::vector<std::pair<Vector, VectorMetadata>>& vectors) {
     LOG_ENTER();
     LOG_INFO("Batch insert: " + std::to_string(vectors.size()) + " vectors");
     
@@ -351,8 +277,8 @@ bool VectorStore::InsertVectors(const std::vector<std::pair<Vector, std::string>
     
     bool success = true;
     int count = 0;
-    for (const auto& [vec, content] : vectors) {
-        if (InsertVector(-1, vec, content) < 0) {
+    for (const auto& [vec, metadata] : vectors) {
+        if (InsertVector(-1, vec, metadata) < 0) {
             success = false;
             LOG_ERROR("Failed at index " + std::to_string(count));
             break;
@@ -436,17 +362,105 @@ std::vector<SearchResult> VectorStore::SearchSimilar(const Vector& query_vector,
 }
 
 std::vector<SearchResult> VectorStore::SearchSimilarWithFilter(
-    const Vector& query_vector, int top_k, const std::string& where_clause) {
+    const Vector& query_vector, int top_k, const std::unordered_map<std::string, std::string>& filters) {
     LOG_ENTER();
-    LOG_INFO("Filter search: where=" + where_clause);
+    LOG_INFO("Filter search: filters_count=" + std::to_string(filters.size()));
     
-    // TODO: 实现带过滤的搜索
-    // vec0 支持在 MATCH 后添加 AND 条件
-    // 例如: WHERE embedding MATCH ? AND some_metadata = ?
+    std::vector<SearchResult> results;
     
-    LOG_INFO("Filter search not fully implemented, using regular search");
+    if (!is_initialized_) {
+        last_error_ = "VectorStore not initialized";
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return results;
+    }
+    
+    if ((int)query_vector.size() != config_.vector_dimension) {
+        last_error_ = "Query vector dimension mismatch";
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return results;
+    }
+    
+    if (filters.empty()) {
+        LOG_INFO("No filters, using regular search");
+        LOG_EXIT();
+        return SearchSimilar(query_vector, top_k);
+    }
+    
+    // 构建安全的参数化查询
+    // 只允许特定的元数据字段，防止 SQL 注入
+    static const std::unordered_set<std::string> allowed_fields = {
+        "convention_id", "servermessage_id", "recordtype", 
+        "orinaccout", "msgTimestamp", "content", "created_at"
+    };
+    
+    std::vector<std::string> valid_filters;
+    std::vector<std::string> filter_values;
+    
+    for (const auto& [key, value] : filters) {
+        if (allowed_fields.find(key) != allowed_fields.end()) {
+            valid_filters.push_back(key);
+            filter_values.push_back(value);
+        } else {
+            LOG_ERROR("Invalid filter field: " + key);
+        }
+    }
+    
+    if (valid_filters.empty()) {
+        LOG_ERROR("No valid filter fields, using regular search");
+        LOG_EXIT();
+        return SearchSimilar(query_vector, top_k);
+    }
+    
+    // 构建 SQL（字段名是硬编码的，值用参数绑定）
+    std::string sql = "SELECT rowid, distance FROM " + config_.table_name + 
+                      " WHERE embedding MATCH ?";
+    
+    for (const auto& field : valid_filters) {
+        sql += " AND " + field + " = ?";
+    }
+    
+    sql += " ORDER BY distance LIMIT ?;";
+    
+    LOG_INFO("Preparing filter search SQL: " + sql);
+    
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = "Failed to prepare filter search: " + std::string(sqlite3_errmsg(impl_->db_));
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return results;
+    }
+    
+    // 绑定参数
+    int bind_idx = 1;
+    
+    // 绑定向量
+    sqlite3_bind_blob(stmt, bind_idx++, query_vector.data(), 
+                     query_vector.size() * sizeof(float), SQLITE_STATIC);
+    
+    // 绑定过滤值（所有值作为 TEXT）
+    for (const auto& value : filter_values) {
+        sqlite3_bind_text(stmt, bind_idx++, value.c_str(), -1, SQLITE_STATIC);
+    }
+    
+    // 绑定 limit
+    sqlite3_bind_int(stmt, bind_idx++, top_k);
+    
+    LOG_INFO("Executing filter search...");
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t rowid = sqlite3_column_int64(stmt, 0);
+        double distance = sqlite3_column_double(stmt, 1);
+        results.emplace_back(rowid, static_cast<float>(distance), "");
+        LOG_INFO("Found: rowid=" + std::to_string(rowid) + ", distance=" + std::to_string(distance));
+    }
+    
+    sqlite3_finalize(stmt);
+    LOG_INFO("Filter search complete: " + std::to_string(results.size()) + " results");
     LOG_EXIT();
-    return SearchSimilar(query_vector, top_k);
+    return results;
 }
 
 bool VectorStore::DeleteVector(int64_t row_id) {
@@ -478,11 +492,11 @@ bool VectorStore::DeleteVector(int64_t row_id) {
     return success;
 }
 
-bool VectorStore::UpdateVector(int64_t row_id, const Vector& vector, const std::string& content) {
+bool VectorStore::UpdateVector(int64_t row_id, const Vector& vector, const VectorMetadata& metadata) {
     LOG_ENTER();
     LOG_INFO("Updating row_id=" + std::to_string(row_id));
     LOG_EXIT();
-    return InsertVector(row_id, vector, content) >= 0;
+    return InsertVector(row_id, vector, metadata) >= 0;
 }
 
 int64_t VectorStore::GetVectorCount() {
@@ -553,12 +567,19 @@ RAGQueryEngine::RAGQueryEngine(VectorStore& vector_store, EmbeddingService& embe
     LOG_EXIT();
 }
 
-bool RAGQueryEngine::AddDocument(const std::string& text, const std::string& metadata) {
+bool RAGQueryEngine::AddDocument(const std::string& text, const std::string& doc_metadata) {
     LOG_ENTER();
     LOG_INFO("Adding document: " + text.substr(0, 50) + "...");
     auto vector = embedding_service_.Embed(text);
     LOG_INFO("Embedding generated, dim=" + std::to_string(vector.size()));
-    bool success = vector_store_.InsertVector(-1, vector, text) >= 0;
+    
+    // 构建元数据
+    VectorMetadata meta;
+    meta.content = text;
+    meta.created_at = "2024-01-01 00:00:00"; // TODO: 使用实际时间
+    // doc_metadata 可以解析为其他字段
+    
+    bool success = vector_store_.InsertVector(-1, vector, meta) >= 0;
     LOG_INFO("Insert " + std::string(success ? "successful" : "failed"));
     LOG_EXIT();
     return success;
@@ -569,9 +590,12 @@ bool RAGQueryEngine::AddDocuments(const std::vector<std::string>& texts) {
     LOG_INFO("Adding " + std::to_string(texts.size()) + " documents");
     auto vectors = embedding_service_.EmbedBatch(texts);
     LOG_INFO("Generated " + std::to_string(vectors.size()) + " embeddings");
-    std::vector<std::pair<Vector, std::string>> data;
+    std::vector<std::pair<Vector, VectorMetadata>> data;
     for (size_t i = 0; i < texts.size(); ++i) {
-        data.emplace_back(std::move(vectors[i]), texts[i]);
+        VectorMetadata meta;
+        meta.content = texts[i];
+        meta.created_at = "2024-01-01 00:00:00"; // TODO: 使用实际时间
+        data.emplace_back(std::move(vectors[i]), std::move(meta));
     }
     bool success = vector_store_.InsertVectors(data);
     LOG_EXIT();
