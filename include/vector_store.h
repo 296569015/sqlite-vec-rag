@@ -12,16 +12,6 @@ namespace rag {
 // 向量类型定义
 using Vector = std::vector<float>;
 
-// 搜索结果结构
-struct SearchResult {
-    int64_t row_id;
-    float distance;
-    std::string content;  // 可选：原始内容
-    
-    SearchResult(int64_t id, float dist, std::string text = "")
-        : row_id(id), distance(dist), content(std::move(text)) {}
-};
-
 // 向量元数据结构 - 用于插入时携带业务字段
 struct VectorMetadata {
     std::string convention_id;       // 会话ID
@@ -31,6 +21,16 @@ struct VectorMetadata {
     int64_t msgTimestamp = 0;        // 消息时间戳 (Unix Timestamp)
     std::string content;             // 消息内容
     std::string created_at;          // 入库时间
+};
+
+// 搜索结果结构 - 包含完整元数据
+struct SearchResult {
+    int64_t row_id;
+    float distance;
+    VectorMetadata metadata;  // 完整元数据
+    
+    SearchResult(int64_t id = 0, float dist = 0.0f) 
+        : row_id(id), distance(dist) {}
 };
 
 // 向量存储配置

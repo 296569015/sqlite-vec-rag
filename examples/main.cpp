@@ -111,9 +111,13 @@ void DemoBasicOperations() {
     
     std::cout << "\n--- Search Results ---" << std::endl;
     for (size_t i = 0; i < results.size(); ++i) {
+        const auto& meta = results[i].metadata;
         std::cout << "Rank " << (i + 1) << ": RowID=" << results[i].row_id 
                   << ", Distance=" << std::fixed << std::setprecision(6) << results[i].distance
-                  << ", Content=" << results[i].content << std::endl;
+                  << "\n  ConventionID=" << meta.convention_id
+                  << ", RecordType=" << meta.recordtype
+                  << ", OrinAccout=" << meta.orinaccout
+                  << "\n  Content=\"" << meta.content << "\"" << std::endl;
     }
     
     // Filter search demo
@@ -125,8 +129,11 @@ void DemoBasicOperations() {
     std::cout << "--- Filter Search Results ---" << std::endl;
     std::cout << "Found " << filter_results.size() << " results with filter" << std::endl;
     for (size_t i = 0; i < filter_results.size(); ++i) {
+        const auto& meta = filter_results[i].metadata;
         std::cout << "Rank " << (i + 1) << ": RowID=" << filter_results[i].row_id 
-                  << ", Distance=" << std::fixed << std::setprecision(6) << filter_results[i].distance << std::endl;
+                  << ", Distance=" << std::fixed << std::setprecision(6) << filter_results[i].distance
+                  << "\n  ConventionID=" << meta.convention_id
+                  << ", Content=\"" << meta.content << "\"" << std::endl;
     }
     
     std::cout << "\n[OK] Demo 1 completed!" << std::endl;
@@ -209,9 +216,13 @@ void DemoMetadataStorage() {
     
     std::cout << "\n--- Search Results ---" << std::endl;
     for (size_t i = 0; i < results.size(); ++i) {
+        const auto& meta = results[i].metadata;
         std::cout << "Rank " << (i + 1) << ": RowID=" << results[i].row_id 
                   << ", Distance=" << std::fixed << std::setprecision(6) << results[i].distance
-                  << ", Content=" << results[i].content << std::endl;
+                  << "\n  Conv=" << meta.convention_id
+                  << ", Type=" << meta.recordtype
+                  << ", User=" << meta.orinaccout
+                  << "\n  Content=\"" << meta.content << "\"" << std::endl;
     }
     
     // Filter search by conversation
@@ -223,8 +234,11 @@ void DemoMetadataStorage() {
     std::cout << "--- Filter Search Results (conv_001) ---" << std::endl;
     std::cout << "Found " << filter_results.size() << " results" << std::endl;
     for (size_t i = 0; i < filter_results.size(); ++i) {
+        const auto& meta = filter_results[i].metadata;
         std::cout << "Rank " << (i + 1) << ": RowID=" << filter_results[i].row_id 
-                  << ", Distance=" << std::fixed << std::setprecision(6) << filter_results[i].distance << std::endl;
+                  << ", Distance=" << std::fixed << std::setprecision(6) << filter_results[i].distance
+                  << "\n  Conv=" << meta.convention_id
+                  << ", Content=\"" << meta.content << "\"" << std::endl;
     }
     
     std::cout << "\n[OK] Demo 2 completed!" << std::endl;

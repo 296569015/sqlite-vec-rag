@@ -324,14 +324,15 @@ std::vector<SearchResult> VectorStore::SearchSimilar(const Vector& query_vector,
     }
     
     // 使用 sqlite-vec 的 MATCH 语法进行向量搜索
-    // 这是 vec0 虚拟表的核心功能！
+    // 使用子查询 JOIN 主表获取完整元数据
     sqlite3_stmt* stmt;
     std::string sql = 
-        "SELECT rowid, distance "
-        "FROM " + config_.table_name + " "
-        "WHERE embedding MATCH ? "
-        "ORDER BY distance "
-        "LIMIT ?;";
+        "SELECT v.rowid, v.distance, "
+        "m.convention_id, m.servermessage_id, m.recordtype, "
+        "m.orinaccout, m.msgTimestamp, m.content, m.created_at "
+        "FROM (SELECT rowid, distance FROM " + config_.table_name + 
+        " WHERE embedding MATCH ? ORDER BY distance LIMIT ?) v "
+        "JOIN " + config_.table_name + " m ON v.rowid = m.rowid;";
     
     LOG_INFO("Preparing search SQL: " + sql);
     int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
@@ -349,10 +350,28 @@ std::vector<SearchResult> VectorStore::SearchSimilar(const Vector& query_vector,
     
     LOG_INFO("Executing search...");
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int64_t rowid = sqlite3_column_int64(stmt, 0);
-        double distance = sqlite3_column_double(stmt, 1);
-        results.emplace_back(rowid, static_cast<float>(distance), "");
-        LOG_INFO("Found: rowid=" + std::to_string(rowid) + ", distance=" + std::to_string(distance));
+        SearchResult result;
+        result.row_id = sqlite3_column_int64(stmt, 0);
+        result.distance = static_cast<float>(sqlite3_column_double(stmt, 1));
+        
+        // 解析元数据
+        const char* text;
+        text = (const char*)sqlite3_column_text(stmt, 2);
+        if (text) result.metadata.convention_id = text;
+        text = (const char*)sqlite3_column_text(stmt, 3);
+        if (text) result.metadata.servermessage_id = text;
+        text = (const char*)sqlite3_column_text(stmt, 4);
+        if (text) result.metadata.recordtype = text;
+        text = (const char*)sqlite3_column_text(stmt, 5);
+        if (text) result.metadata.orinaccout = text;
+        result.metadata.msgTimestamp = sqlite3_column_int64(stmt, 6);
+        text = (const char*)sqlite3_column_text(stmt, 7);
+        if (text) result.metadata.content = text;
+        text = (const char*)sqlite3_column_text(stmt, 8);
+        if (text) result.metadata.created_at = text;
+        
+        results.push_back(std::move(result));
+        LOG_INFO("Found: rowid=" + std::to_string(result.row_id) + ", distance=" + std::to_string(result.distance));
     }
     
     sqlite3_finalize(stmt);
@@ -414,14 +433,20 @@ std::vector<SearchResult> VectorStore::SearchSimilarWithFilter(
     }
     
     // 构建 SQL（字段名是硬编码的，值用参数绑定）
-    std::string sql = "SELECT rowid, distance FROM " + config_.table_name + 
-                      " WHERE embedding MATCH ?";
+    // 使用 CTE (Common Table Expression) 先过滤再 JOIN 获取完整元数据
+    std::string sql = 
+        "WITH filtered AS (SELECT rowid, distance FROM " + config_.table_name + 
+        " WHERE embedding MATCH ?";
     
     for (const auto& field : valid_filters) {
         sql += " AND " + field + " = ?";
     }
     
-    sql += " ORDER BY distance LIMIT ?;";
+    sql += " ORDER BY distance LIMIT ?) "
+           "SELECT f.rowid, f.distance, "
+           "m.convention_id, m.servermessage_id, m.recordtype, "
+           "m.orinaccout, m.msgTimestamp, m.content, m.created_at "
+           "FROM filtered f JOIN " + config_.table_name + " m ON f.rowid = m.rowid;";
     
     LOG_INFO("Preparing filter search SQL: " + sql);
     
@@ -451,10 +476,28 @@ std::vector<SearchResult> VectorStore::SearchSimilarWithFilter(
     
     LOG_INFO("Executing filter search...");
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int64_t rowid = sqlite3_column_int64(stmt, 0);
-        double distance = sqlite3_column_double(stmt, 1);
-        results.emplace_back(rowid, static_cast<float>(distance), "");
-        LOG_INFO("Found: rowid=" + std::to_string(rowid) + ", distance=" + std::to_string(distance));
+        SearchResult result;
+        result.row_id = sqlite3_column_int64(stmt, 0);
+        result.distance = static_cast<float>(sqlite3_column_double(stmt, 1));
+        
+        // 解析元数据
+        const char* text;
+        text = (const char*)sqlite3_column_text(stmt, 2);
+        if (text) result.metadata.convention_id = text;
+        text = (const char*)sqlite3_column_text(stmt, 3);
+        if (text) result.metadata.servermessage_id = text;
+        text = (const char*)sqlite3_column_text(stmt, 4);
+        if (text) result.metadata.recordtype = text;
+        text = (const char*)sqlite3_column_text(stmt, 5);
+        if (text) result.metadata.orinaccout = text;
+        result.metadata.msgTimestamp = sqlite3_column_int64(stmt, 6);
+        text = (const char*)sqlite3_column_text(stmt, 7);
+        if (text) result.metadata.content = text;
+        text = (const char*)sqlite3_column_text(stmt, 8);
+        if (text) result.metadata.created_at = text;
+        
+        results.push_back(std::move(result));
+        LOG_INFO("Found: rowid=" + std::to_string(result.row_id) + ", distance=" + std::to_string(result.distance));
     }
     
     sqlite3_finalize(stmt);
