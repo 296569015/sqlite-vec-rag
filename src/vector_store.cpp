@@ -66,7 +66,7 @@ public:
         LOG_ENTER();
         // 尝试多个可能的路径
         std::vector<std::string> try_paths = {
-            "third_party/vec0",
+            "./vec0",
             "third_party/vec0.dll",
             "./third_party/vec0",
             "./third_party/vec0.dll",
@@ -570,17 +570,38 @@ bool VectorStore::ClearAll() {
     LOG_ENTER();
     
     if (!is_initialized_) {
-        LOG_ERROR("VectorStore not initialized");
+        last_error_ = "VectorStore not initialized";
+        LOG_ERROR(last_error_);
         LOG_EXIT();
         return false;
     }
     
     LOG_INFO("Clearing all data from table: " + config_.table_name);
     std::string sql = "DELETE FROM " + config_.table_name + ";";
-    bool success = impl_->ExecuteSQL(sql);
-    LOG_INFO("Clear " + std::string(success ? "successful" : "failed"));
+    
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = "Failed to prepare clear: " + std::string(sqlite3_errmsg(impl_->db_));
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return false;
+    }
+    
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    // DELETE 返回 SQLITE_DONE 表示成功（即使没有行被删除）
+    if (rc != SQLITE_DONE) {
+        last_error_ = "Failed to clear table: " + std::string(sqlite3_errmsg(impl_->db_));
+        LOG_ERROR(last_error_);
+        LOG_EXIT();
+        return false;
+    }
+    
+    LOG_INFO("Clear successful");
     LOG_EXIT();
-    return success;
+    return true;
 }
 
 void* VectorStore::GetDbHandle() const {

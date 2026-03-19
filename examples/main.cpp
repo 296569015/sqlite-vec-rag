@@ -136,6 +136,14 @@ void DemoBasicOperations() {
                   << ", Content=\"" << meta.content << "\"" << std::endl;
     }
     
+    // Test ClearAll
+    std::cout << "\n[INFO] Testing ClearAll..." << std::endl;
+    if (store.ClearAll()) {
+        std::cout << "[OK] ClearAll successful, count=" << store.GetVectorCount() << std::endl;
+    } else {
+        std::cout << "[ERROR] ClearAll failed: " << store.GetLastError() << std::endl;
+    }
+    
     std::cout << "\n[OK] Demo 1 completed!" << std::endl;
 }
 
