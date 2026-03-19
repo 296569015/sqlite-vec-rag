@@ -56,6 +56,8 @@ public:
         char* err_msg = nullptr;
         int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
         if (rc != SQLITE_OK && err_msg) {
+            LOG_ERROR(err_msg);
+            LOG_ERROR(sql);
             sqlite3_free(err_msg);
         }
         return rc == SQLITE_OK;
