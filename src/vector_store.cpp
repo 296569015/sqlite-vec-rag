@@ -237,7 +237,7 @@ int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const Ve
     sqlite3_bind_text(stmt, bind_idx++, metadata.servermessage_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.recordtype.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.orinaccout.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, bind_idx++, metadata.msgTimestamp.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, bind_idx++, metadata.msgTimestamp.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.content.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.created_at.c_str(), -1, SQLITE_STATIC);
     

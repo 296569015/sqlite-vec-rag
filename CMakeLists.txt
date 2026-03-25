@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-set(LIBRARY_TAGET_NAME "vector_search")
+set(LIBRARY_TARGET_NAME "vector_search")
 project(VectorSearch VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
