@@ -9,16 +9,16 @@
 
 // 日志宏
 #define LOG_ENTER() \
-    std::cout << "[EXT][ENTER] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
+//    std::cout << "[EXT][ENTER] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
 
 #define LOG_EXIT() \
-    std::cout << "[EXT][EXIT] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
+//    std::cout << "[EXT][EXIT] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
 
 #define LOG_INFO(msg) \
-    std::cout << "[EXT][INFO] " << __FUNCTION__ << "(): " << msg << std::endl
+//    std::cout << "[EXT][INFO] " << __FUNCTION__ << "(): " << msg << std::endl
 
 #define LOG_ERROR(msg) \
-    std::cerr << "[EXT][ERROR] " << __FUNCTION__ << "(): " << msg << std::endl
+//    std::cerr << "[EXT][ERROR] " << __FUNCTION__ << "(): " << msg << std::endl
 
 static std::string GetCurrentTime() {
     auto now = std::chrono::system_clock::now();

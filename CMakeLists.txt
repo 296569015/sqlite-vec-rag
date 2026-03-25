@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
+set(LIBRARY_TAGET_NAME "vector_search")
 project(VectorSearch VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 选项
-option(BUILD_EXAMPLES "Build examples" ON)
 
 # SQLite3 配置 - 使用项目目录下的 sqlite3
 set(SQLITE3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sqlite3")
@@ -55,18 +54,9 @@ if(WIN32)
     target_link_libraries(vector_search PUBLIC ws2_32)
 endif()
 
-# 示例程序
-if(BUILD_EXAMPLES)
-    add_executable(vector_search_example examples/main.cpp)
-    target_link_libraries(vector_search_example PRIVATE vector_search)
-    set_target_properties(vector_search_example PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
-endif()
 
 # 打印配置信息
 message(STATUS "============================================")
 message(STATUS "VectorSearch Configuration:")
 message(STATUS "  SQLite3: ${SQLITE3_DIR}")
-message(STATUS "  Build examples: ${BUILD_EXAMPLES}")
 message(STATUS "============================================")

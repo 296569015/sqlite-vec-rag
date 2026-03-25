@@ -13,16 +13,16 @@
 
 // 日志宏定义
 #define LOG_ENTER() \
-    std::cout << "[LOG][ENTER] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
+//    std::cout << "[LOG][ENTER] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
 
 #define LOG_EXIT() \
-    std::cout << "[LOG][EXIT] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
+//    std::cout << "[LOG][EXIT] " << __FUNCTION__ << "() at " << GetCurrentTime() << std::endl
 
 #define LOG_INFO(msg) \
-    std::cout << "[LOG][INFO] " << __FUNCTION__ << "(): " << msg << std::endl
+//    std::cout << "[LOG][INFO] " << __FUNCTION__ << "(): " << msg << std::endl
 
 #define LOG_ERROR(msg) \
-    std::cerr << "[LOG][ERROR] " << __FUNCTION__ << "(): " << msg << std::endl
+//   std::cerr << "[LOG][ERROR] " << __FUNCTION__ << "(): " << msg << std::endl
 
 // 获取当前时间字符串
 static std::string GetCurrentTime() {
@@ -147,7 +147,7 @@ bool VectorStore::Initialize() {
         << "servermessage_id TEXT METADATA, "    // 服务器消息唯一ID
         << "recordtype TEXT METADATA, "          // 消息类型
         << "orinaccout TEXT METADATA, "          // 发送人账号
-        << "msgTimestamp INTEGER METADATA, "     // 消息时间戳
+        << "msgTimestamp TEXT METADATA, "     // 消息时间戳
         // 原有字段
         << "content TEXT METADATA, "             // 消息内容
         << "created_at TEXT METADATA"            // 入库时间 (sqlite-vec 不支持 TIMESTAMP)
@@ -237,7 +237,7 @@ int64_t VectorStore::InsertVector(int64_t row_id, const Vector& vector, const Ve
     sqlite3_bind_text(stmt, bind_idx++, metadata.servermessage_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.recordtype.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.orinaccout.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, bind_idx++, metadata.msgTimestamp);
+    sqlite3_bind_int64(stmt, bind_idx++, metadata.msgTimestamp.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.content.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, bind_idx++, metadata.created_at.c_str(), -1, SQLITE_STATIC);
     
@@ -518,7 +518,7 @@ bool VectorStore::DeleteVector(int64_t row_id) {
         return false;
     }
     
-    std::string sql = "DELETE FROM " + config_.table_name + " WHERE rowid = ?;";
+    std::string sql = "DROP TABLE IF EXISTS " + config_.table_name + ";";
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -579,7 +579,7 @@ bool VectorStore::ClearAll() {
     }
     
     LOG_INFO("Clearing all data from table: " + config_.table_name);
-    std::string sql = "DELETE FROM " + config_.table_name + ";";
+    std::string sql = "DROP TABLE IF EXISTS " + config_.table_name + ";";
     
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(impl_->db_, sql.c_str(), -1, &stmt, nullptr);

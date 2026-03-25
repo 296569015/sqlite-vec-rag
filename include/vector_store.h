@@ -18,7 +18,7 @@ struct VectorMetadata {
     std::string servermessage_id;    // 服务器消息唯一ID
     std::string recordtype;          // 消息类型 (如: "text", "image", "system")
     std::string orinaccout;          // 发送人账号
-    int64_t msgTimestamp = 0;        // 消息时间戳 (Unix Timestamp)
+    std::string msgTimestamp;        // 消息时间戳 (Unix Timestamp)
     std::string content;             // 消息内容
     std::string created_at;          // 入库时间
 };
